@@ -3,20 +3,18 @@ package com.github.yhanada.slackbotsample
 import com.github.salomonbrys.kotson.get
 import com.github.salomonbrys.kotson.toJsonArray
 import com.github.yhanada.slackbotsample.calendar.GoogleCalendar
-import com.google.api.client.util.DateTime
 import com.google.api.services.calendar.model.Event
+import com.google.api.services.calendar.model.EventDateTime
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import mu.KotlinLogging
 import okhttp3.*
-import org.slf4j.LoggerFactory
 
 class SlackBot(private val token: String, private val userId: String) {
 
-    lateinit var selfID: String
-    lateinit var selfName: String
-
-    data class MessageId(val ts: String, val channel: String)
+    lateinit var botId: String
+    lateinit var botName: String
 
     data class CalendarField(val title: String, val value: String)
 
@@ -24,108 +22,112 @@ class SlackBot(private val token: String, private val userId: String) {
         companion object {
             private const val FORMAT = "<!date^%d^ {date_num} {time}|%s >"
             fun create(event: Event): CalendarItem {
-                val fields = mutableListOf<CalendarField>()
-                fields.add(CalendarField("Start", String.format(FORMAT, event.start.dateTime.value / 1000, event.start.dateTime.toString())))
-                fields.add(CalendarField("End", String.format(FORMAT, event.end.dateTime.value / 1000, event.end.dateTime.toString())))
+                val fields = listOf("start", "end").map {
+                    val dt: EventDateTime = event[it] as EventDateTime
+                    CalendarField(it.toUpperCase(), String.format(FORMAT, dt.dateTime.value / 1000, dt.toString()))
+                }.toList()
                 return CalendarItem(event.summary, fields)
             }
         }
     }
 
-    fun start() {
-        val url = startUrl +
+    fun connect() {
+        val url = connectUrl +
                 "?token=$token" +
                 "&simple_latest=true" +
                 "&no_unreads=true"
-        val startRequest = Request.Builder()
+        val request = Request.Builder()
                 .url(url)
                 .get().build()
 
-        val startResponseText = okhttpclient
-                .newCall(startRequest)
+        val responseText = okhttpclient
+                .newCall(request)
                 .execute()
                 .body()
                 ?.string()
 
-        val startResponse = parser.parse(startResponseText)
-        if (startResponse["ok"].asBoolean) {
-            selfName = startResponse["self"]["name"].asString
-            selfID = startResponse["self"]["id"].asString
-            val req = Request.Builder().url(startResponse["url"].asString).build()
+        val response = parser.parse(responseText)
+        if (response["ok"].asBoolean) {
+            botId = response["self"]["id"].asString
+            botName = response["self"]["name"].asString
+
+            val req = Request.Builder().url(response["url"].asString).build()
             okhttpclient.newWebSocket(req, SlackEventListener())
             okhttpclient.dispatcher().executorService().shutdown()
         } else {
-            logger.error("Failed to start: $startRequest")
+            logger.error("Failed to connect: $response")
         }
     }
 
-    fun fillMessageBodyBuilder(items: List<CalendarItem>, channel: String): FormBody.Builder {
-        val encodingBuilder = FormBody.Builder()
-        encodingBuilder.add("token", token)
-        encodingBuilder.add("text", "予定です")
-        encodingBuilder.add("channel", channel)
-        encodingBuilder.add("parse", "none")
-
-        if (items.isEmpty()) return encodingBuilder
-
-        val attachments = items.map { gson.toJsonTree(it) }.toJsonArray()
-        encodingBuilder.add("attachments", gson.toJson(attachments))
-        return encodingBuilder
+    private fun createMessageBodyBuilder(text: String): FormBody.Builder {
+        return FormBody.Builder().run {
+            add("text", text)
+        }
     }
 
-    fun postMessage(items: List<CalendarItem>, channel: String): MessageId? {
-        val bodyBuilder = fillMessageBodyBuilder(items, channel)
-        bodyBuilder.add("username", selfName)
+    private fun createMessageBodyBuilder(items: List<CalendarItem>): FormBody.Builder {
+        return FormBody.Builder().run {
+            add("text", "予定です")
+
+            val attachments = items.map { gson.toJsonTree(it) }.toJsonArray()
+            add("attachments", gson.toJson(attachments))
+        }
+    }
+
+    private fun postMessage(body: FormBody.Builder, channel: String) {
+        body.add("token", token)
+        body.add("username", botName)
+        body.add("channel", channel)
+        body.add("parse", "none")
+        body.add("as_user", true.toString())
+
         val response = okhttpclient.newCall(postMessageRequestBuilder
-                .post(bodyBuilder.build())
-                .build()).execute()
+                .post(body.build())
+                .build())
+                .execute()
+
         val resultObject = parser.parse(response.body()?.string())
-        if (resultObject["ok"].asBoolean)
-            return MessageId(resultObject["ts"].asString, channel)
-        return null
+        logger.debug("result:$resultObject")
     }
 
-
-    fun processMessage(t: JsonObject, channel: String) {
+    private fun handleMessage(t: JsonObject, channel: String) {
         if (t.has("message"))
-            processMessage(t["message"].asJsonObject, channel)
+            handleMessage(t["message"].asJsonObject, channel)
         else {
             val text = t["text"].asString
-            if (selfID !in text)
+            if (botId !in text)
                 return
-            println("text:" + text)
-            val googleCalendar = GoogleCalendar(userId)
-            val items = googleCalendar.getEventItemss()
-            if (items.isNotEmpty()) {
-                val list: MutableList<CalendarItem> = mutableListOf()
-                for (event in items) {
-                    var start: DateTime? = event.start.dateTime
-                    if (start == null) {
-                        start = event.start.date
+
+            val body: FormBody.Builder? = when {
+                "hello" in text -> createMessageBodyBuilder("はろー")
+                "ping" in text -> createMessageBodyBuilder("pong")
+                "予定" in text -> {
+                    val googleCalendar = GoogleCalendar(userId)
+                    val list = googleCalendar.getEventItemss().map {
+                        CalendarItem.create(it)
+                    }.toList()
+
+                    when {
+                        list.isNotEmpty() -> createMessageBodyBuilder(list)
+                        else -> createMessageBodyBuilder("予定はありません")
                     }
-                    var end: DateTime? = event.end.dateTime
-                    if (end == null) {
-                        end = event.end.date
-                    }
-                    var s: Long = event.start.dateTime.value / 1000
-                    var e: Long = event.end.dateTime.value / 1000
-                    list.add(CalendarItem.create(event))
                 }
-                postMessage(list, channel)!!
-            } else {
-                postMessage(emptyList(), channel)!!
+                else -> null
+            }
+            body?.let {
+                postMessage(it, channel)
             }
         }
     }
 
-    fun processMessage(json: JsonObject) {
+    private fun processMessage(json: JsonObject) {
         when (json["type"].asString) {
             "message" -> {
                 logger.info("New message")
-                processMessage(json, json["channel"].asString)
+                handleMessage(json, json["channel"].asString)
             }
             else -> {
-                logger.info("unsupported: ${json["type"]}")
+                logger.info("Unsupported: ${json["type"]}")
             }
         }
     }
@@ -157,17 +159,17 @@ class SlackBot(private val token: String, private val userId: String) {
         }
 
         override fun onClosed(webSocket: WebSocket?, code: Int, reason: String?) {
-            logger.debug("onClosed $reason")
+            logger.debug ("onClosed $reason")
         }
     }
 
     companion object {
         val apiUrl = "https://slack.com/api"
-        val startUrl = "$apiUrl/rtm.start"
+        val connectUrl = "$apiUrl/rtm.connect"
         val postMessageRequestBuilder = Request.Builder().url("$apiUrl/chat.postMessage")
         val gson = Gson()
         val parser = JsonParser()
         val okhttpclient = OkHttpClient()
-        val logger = LoggerFactory.getLogger(javaClass.simpleName)
+        val logger = KotlinLogging.logger{}
     }
 }

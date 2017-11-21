@@ -9,7 +9,7 @@ object Main {
         val userId = env["USER_ID"]!!
 
         val bot = SlackBot(token, userId)
-        bot.start()
+        bot.connect()
 
     }
 }
