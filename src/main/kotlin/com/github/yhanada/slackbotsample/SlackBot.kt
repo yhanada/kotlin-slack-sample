@@ -60,13 +60,13 @@ class SlackBot(private val token: String, private val userId: String) {
     }
 
     private fun createMessageBodyBuilder(text: String): FormBody.Builder {
-        return FormBody.Builder().run {
+        return FormBody.Builder().apply {
             add("text", text)
         }
     }
 
     private fun createMessageBodyBuilder(items: List<CalendarItem>): FormBody.Builder {
-        return FormBody.Builder().run {
+        return FormBody.Builder().apply {
             add("text", "予定です")
 
             val attachments = items.map { gson.toJsonTree(it) }.toJsonArray()
@@ -90,9 +90,9 @@ class SlackBot(private val token: String, private val userId: String) {
         logger.debug("result:$resultObject")
     }
 
-    private fun handleMessage(t: JsonObject, channel: String) {
+    private fun handleMessage(t: JsonObject) {
         if (t.has("message"))
-            handleMessage(t["message"].asJsonObject, channel)
+            handleMessage(t["message"].asJsonObject)
         else {
             val text = t["text"].asString
             if (botId !in text)
@@ -102,8 +102,7 @@ class SlackBot(private val token: String, private val userId: String) {
                 "hello" in text -> createMessageBodyBuilder("はろー")
                 "ping" in text -> createMessageBodyBuilder("pong")
                 "予定" in text -> {
-                    val googleCalendar = GoogleCalendar(userId)
-                    val list = googleCalendar.getEventItemss().map {
+                    val list = GoogleCalendar(userId).getEventItemss().map {
                         CalendarItem.create(it)
                     }.toList()
 
@@ -115,7 +114,7 @@ class SlackBot(private val token: String, private val userId: String) {
                 else -> null
             }
             body?.let {
-                postMessage(it, channel)
+                postMessage(it, t["channel"].asString)
             }
         }
     }
@@ -123,8 +122,7 @@ class SlackBot(private val token: String, private val userId: String) {
     private fun processMessage(json: JsonObject) {
         when (json["type"].asString) {
             "message" -> {
-                logger.info("New message")
-                handleMessage(json, json["channel"].asString)
+                handleMessage(json)
             }
             else -> {
                 logger.info("Unsupported: ${json["type"]}")
